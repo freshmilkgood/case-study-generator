@@ -88,7 +88,7 @@
   <!-- ============ 좌측: 입력 폼 ============ -->
   <div class="form-pane">
     <h1>📄 구축사례 HTML 생성기<span class="version-tag">v2</span></h1>
-    <p class="desc">내용을 입력하면 자동으로 알맞은 자리에 채워지고, 이미지는 오른쪽 미리보기의 박스를 클릭해서 바로 원하는 위치에 넣을 수 있습니다. 완성된 HTML은 게시판 에디터에 HTML 모드로 그대로 붙여넣으면 됩니다.</p>
+    <p class="desc">내용을 입력하면 자동으로 알맞은 자리에 채워지고, 이미지는 오른쪽 미리보기의 박스를 클릭하거나 이미지 파일을 끌어다 놓아 원하는 위치에 넣을 수 있습니다. 완성된 HTML은 게시판 에디터에 HTML 모드로 그대로 붙여넣으면 됩니다.</p>
 
     <!-- A. 전문 자동 채우기 -->
     <details class="sec" open>
@@ -203,7 +203,7 @@
         <button class="tab" id="tabMobilePreview" onclick="switchTab('mobile')">모바일 미리보기</button>
         <button class="tab" id="tabCode" onclick="switchTab('code')">HTML 코드</button>
       </div>
-      <span class="image-hint">미리보기 안의 박스를 클릭해 이미지 추가, 이미지를 드래그해 위치 조정</span>
+      <span class="image-hint">사진 박스에 파일을 끌어다 놓거나 클릭해 추가 · 등록된 사진은 드래그로 위치 조정</span>
       <button class="btn btn-ghost" onclick="copyFragment()">📋 코드 복사</button>
       <button class="btn btn-primary" onclick="downloadHtml()">HTML 파일 다운로드</button>
     </div>
@@ -560,28 +560,37 @@ async function checkImageUrls(){
   showToast(`${okCount}/${checked.length}개 서버 이미지 확인 성공`);
 }
 
-async function handleSlotFileChange(){
-  const files = Array.from($('slotFileInput').files || []);
-  $('slotFileInput').value = '';
-  if(!files.length || !pendingUploadTarget) return;
+async function addFilesToStep(files, target){
+  const match = String(target || '').match(/^step-(\d+)$/);
+  const step = match && steps[Number(match[1])];
+  if(!step) return;
+  const images = Array.from(files || []).filter(file =>
+    file.type.startsWith('image/') || (!file.type && /\.(png|jpe?g|webp|gif|bmp|avif|svg)$/i.test(file.name)));
+  if(!images.length){ showToast('이미지 파일을 넣어주세요'); return; }
   showToast('이미지를 WebP로 변환하는 중입니다');
-
-  const stepMatch = pendingUploadTarget.match(/^step-(\d+)$/);
-  if(stepMatch){
-    const stepIndex = Number(stepMatch[1]);
-    if(steps[stepIndex]){
-      for(const file of files){
-        const converted = await convertFileToWebpV2(file);
-        steps[stepIndex].images.push(converted);
-      }
-    }
+  let added = 0, failed = 0;
+  for(const file of images){
+    try{
+      const converted = await convertFileToWebpV2(file);
+      if(!steps.includes(step)){ URL.revokeObjectURL(converted.blobUrl); continue; }
+      step.images.push(converted);
+      added++;
+    }catch(error){ failed++; }
   }
-  pendingUploadTarget = null;
   renumberImageFilenames();
   drawSteps();
   renderImageSummary();
   updateOutput();
-  showToast('이미지가 추가되었습니다');
+  showToast(added ? added + '개 이미지가 추가되었습니다' + (failed ? ' · ' + failed + '개 변환 실패' : '')
+    : (failed ? '이미지를 읽을 수 없습니다. 다른 이미지 파일을 사용해주세요' : '대상 단계가 변경되어 추가하지 않았습니다'));
+}
+
+async function handleSlotFileChange(){
+  const files = Array.from($('slotFileInput').files || []);
+  const target = pendingUploadTarget;
+  $('slotFileInput').value = '';
+  pendingUploadTarget = null;
+  await addFilesToStep(files, target);
 }
 $('slotFileInput').addEventListener('change', handleSlotFileChange);
 
@@ -690,8 +699,8 @@ function buildFragment(preview = false){
                                         <span style="display:block;width:100%;aspect-ratio:16/9;overflow:hidden;border-radius:14px;background:#F5F5F7;line-height:0;font-size:0;"><img data-step-image-index="${stepIndex}" data-step-image-photo-index="${imageIndex}" src="${preview ? image.dataUrl : normalizeOutputImageSrc(buildImageUrl(image.filename))}" alt="${esc(s.title || `단계 ${i+1} 이미지`)}" style="display:block;width:100%;height:100%;object-fit:cover;object-position:${image.x ?? 50}% ${image.y ?? 50}%;border:0;border-radius:14px;vertical-align:top;line-height:0;"></span>${preview ? `<button type="button" data-remove-step-image="${stepIndex}:${imageIndex}" title="이미지 제거" style="position:absolute;top:10px;right:10px;width:28px;height:28px;border:none;border-radius:50%;background:rgba(17,24,39,.55);color:#fff;font-size:13px;cursor:pointer;line-height:1;">✕</button>` : ''}
                                     </span>`).join('');
       const addMoreHtml = preview ? (s.images.length ? `
-                                    <span data-slot-target="step-${stepIndex}" style="cursor:pointer;display:flex;align-items:center;justify-content:center;width:100%;max-width:620px;height:48px;border:1.5px dashed #cbd5e1;border-radius:14px;background:#F5F5F7;color:#9ca3af;font-size:13px;text-align:center;margin:10px 0 0 0;">+ 사진 추가</span>` : `
-                                    <span data-slot-target="step-${stepIndex}" style="cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;width:100%;max-width:620px;aspect-ratio:16/9;border:1.5px dashed #cbd5e1;border-radius:14px;background:#F5F5F7;color:#9ca3af;font-size:13px;text-align:center;margin:14px 0 0 0;">${stepImageIcon}<span>${esc(s.title || `단계 ${i+1}`)} 사진</span><span style="font-size:12.5px;color:#9ca3af;">or <span style="text-decoration:underline;color:${c};">클릭해서 업로드</span></span></span>`) : '';
+                                    <span data-slot-target="step-${stepIndex}" style="cursor:pointer;display:flex;align-items:center;justify-content:center;width:100%;max-width:620px;height:48px;border:1.5px dashed #cbd5e1;border-radius:14px;background:#F5F5F7;color:#9ca3af;font-size:13px;text-align:center;margin:10px 0 0 0;">+ 사진 추가 · 파일을 여기에 놓으세요</span>` : `
+                                    <span data-slot-target="step-${stepIndex}" style="cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;width:100%;max-width:620px;aspect-ratio:16/9;border:1.5px dashed #cbd5e1;border-radius:14px;background:#F5F5F7;color:#9ca3af;font-size:13px;text-align:center;margin:14px 0 0 0;">${stepImageIcon}<span>${esc(s.title || `단계 ${i+1}`)} 사진</span><span style="font-size:12.5px;color:#9ca3af;">or <span style="text-decoration:underline;color:${c};">클릭하거나 파일을 끌어다 놓으세요</span></span></span>`) : '';
       const stepImageHtml = stepImagesHtml + addMoreHtml;
 
       const connectorLine = isLastStep ? '' : `<span style="position:absolute;left:15px;top:38px;bottom:-28px;width:2px;background:#E8E8ED;font-size:0;line-height:0;">&nbsp;</span>`;
@@ -788,7 +797,46 @@ function bindPreviewInteractions(){
   const doc = $('preview').contentDocument;
   if(!doc) return;
 
+  const isFileDrag = e => Array.from(e.dataTransfer?.types || []).includes('Files');
+  let highlighted = null;
+  const clearHighlight = () => {
+    if(highlighted){
+      highlighted.style.outline = highlighted.dataset.dropOldOutline || '';
+      highlighted.style.outlineOffset = highlighted.dataset.dropOldOffset || '';
+      highlighted = null;
+    }
+  };
+  const dropTarget = e => e.target.closest?.('[data-slot-target], [data-step-image-index]');
+  doc.addEventListener('dragover', e => {
+    if(!isFileDrag(e)) return;
+    e.preventDefault();
+    const target = dropTarget(e);
+    e.dataTransfer.dropEffect = target ? 'copy' : 'none';
+    if(target === highlighted) return;
+    clearHighlight();
+    if(target){
+      highlighted = target;
+      target.dataset.dropOldOutline = target.style.outline;
+      target.dataset.dropOldOffset = target.style.outlineOffset;
+      target.style.outline = '3px solid #0377FF';
+      target.style.outlineOffset = '-3px';
+    }
+  });
+  doc.addEventListener('dragleave', e => {
+    if(!e.relatedTarget || !doc.documentElement.contains(e.relatedTarget)) clearHighlight();
+  });
+  doc.addEventListener('drop', e => {
+    if(!isFileDrag(e)) return;
+    e.preventDefault();
+    clearHighlight();
+    const target = dropTarget(e);
+    if(!target){ showToast('사진 박스 위에 이미지 파일을 놓아주세요'); return; }
+    const slot = target.getAttribute('data-slot-target') || 'step-' + target.getAttribute('data-step-image-index');
+    void addFilesToStep(Array.from(e.dataTransfer.files || []), slot);
+  });
+
   const bindDrag = (img, getStart, setPosition) => {
+    img.draggable = false;
     img.style.cursor = 'move';
     img.title = '드래그해서 이미지 위치를 조정하세요';
 
