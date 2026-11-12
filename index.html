@@ -450,30 +450,136 @@ function loadImageElement(src){
   });
 }
 
+/* ===================== 사진 맞춤 합성 (16:9 틀 기준) =====================
+   - fit 'cover'  : 틀을 꽉 채움 (넘치는 부분은 잘림)
+   - fit 'contain': 사진 전체가 보이게 넣고, 빈 곳은 같은 사진을 흐리게 깔아 채움
+   - zoom         : 1 = 기본 크기, 최대 3배
+   - x, y         : 0~100, 사진 위치 (50 = 가운데)
+   변환된 WebP 자체가 16:9로 만들어지므로 게시판 HTML에서는 잘리지 않음 */
+const FRAME_W = 1920, FRAME_H = 1080;
+const PREVIEW_W = 960, PREVIEW_H = 540;
+
+function defaultFitFor(image){
+  return 'cover';   // 기본은 지금처럼 틀을 꽉 채움 (확대 슬라이더로 줄이거나 키움)
+}
+
+function getBlurBackground(image, W, H){
+  image._bgCache = image._bgCache || {};
+  const key = W + 'x' + H;
+  if(image._bgCache[key]) return image._bgCache[key];
+  const src = image._src;
+  const sw = src.naturalWidth || src.width, sh = src.naturalHeight || src.height;
+  // 작게 줄였다가 다시 키우는 방식으로 흐림 (모든 브라우저 지원)
+  const tiny = document.createElement('canvas');
+  tiny.width = Math.max(8, Math.round(W / 28)); tiny.height = Math.max(8, Math.round(H / 28));
+  const tctx = tiny.getContext('2d');
+  const s = Math.max(tiny.width / sw, tiny.height / sh) * 1.1;
+  tctx.imageSmoothingQuality = 'high';
+  tctx.drawImage(src, (tiny.width - sw * s) / 2, (tiny.height - sh * s) / 2, sw * s, sh * s);
+  const mid = document.createElement('canvas');
+  mid.width = Math.round(W / 6); mid.height = Math.round(H / 6);
+  const mctx = mid.getContext('2d');
+  mctx.imageSmoothingQuality = 'high';
+  mctx.drawImage(tiny, 0, 0, mid.width, mid.height);
+  const bg = document.createElement('canvas');
+  bg.width = W; bg.height = H;
+  const bctx = bg.getContext('2d');
+  bctx.imageSmoothingQuality = 'high';
+  bctx.drawImage(mid, 0, 0, W, H);
+  bctx.fillStyle = 'rgba(0,0,0,0.16)';
+  bctx.fillRect(0, 0, W, H);
+  image._bgCache[key] = bg;
+  return bg;
+}
+
+function drawComposite(image, canvas){
+  const W = canvas.width, H = canvas.height;
+  const ctx = canvas.getContext('2d');
+  const src = image._src;
+  const sw = src.naturalWidth || src.width, sh = src.naturalHeight || src.height;
+  const fit = image.fit || 'cover';
+  const zoom = clamp(Number(image.zoom) || 1, 0.5, 3);
+  const base = fit === 'contain' ? Math.min(W / sw, H / sh) : Math.max(W / sw, H / sh);
+  const dw = sw * base * zoom, dh = sh * base * zoom;
+  const px = (image.x ?? 50) / 100, py = (image.y ?? 50) / 100;
+  const dx = (W - dw) * px, dy = (H - dh) * py;
+  ctx.clearRect(0, 0, W, H);
+  if(dw < W - 0.5 || dh < H - 0.5) ctx.drawImage(getBlurBackground(image, W, H), 0, 0, W, H);
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, dx, dy, dw, dh);
+  image._overflow = { x: dw > W + 0.5, y: dh > H + 0.5 };
+}
+
+function renderPreviewDataUrl(image){
+  image._previewCanvas = image._previewCanvas || Object.assign(document.createElement('canvas'), { width: PREVIEW_W, height: PREVIEW_H });
+  drawComposite(image, image._previewCanvas);
+  return image._previewCanvas.toDataURL('image/jpeg', 0.82);
+}
+
+async function bakeImage(image){
+  const canvas = document.createElement('canvas');
+  canvas.width = FRAME_W; canvas.height = FRAME_H;
+  drawComposite(image, canvas);
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/webp', 0.86));
+  if(!blob) throw new Error('WebP 변환에 실패했습니다');
+  if(image.blobUrl) URL.revokeObjectURL(image.blobUrl);
+  image.blobUrl = URL.createObjectURL(blob);
+  image.dataUrl = await blobToDataUrl(blob);
+  image.size = blob.size;
+  return image;
+}
+
+/* 미리보기 전용 조절 도구 (게시판 HTML에는 들어가지 않음) */
+function imageToolsHtml(image, stepIndex, imageIndex, color){
+  const key = `${stepIndex}:${imageIndex}`;
+  const zoomPct = Math.round((Number(image.zoom) || 1) * 100);
+  const btn = (fit, label) => {
+    const on = (image.fit || 'cover') === fit;
+    return `<button type="button" data-img-fit="${fit}" style="flex:0 0 auto;padding:6px 10px;border-radius:8px;border:1px solid ${on ? color : '#d1d5db'};background:${on ? color : '#ffffff'};color:${on ? '#ffffff' : '#374151'};font-size:12px;font-weight:600;cursor:pointer;line-height:1.2;">${label}</button>`;
+  };
+  return `<span data-img-tools="${key}" style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:8px 0 0 0;padding:8px 10px;border:1px solid #e5e7eb;border-radius:10px;background:#ffffff;font-size:12px;line-height:1.2;color:#374151;">
+      <span style="display:inline-flex;align-items:center;gap:6px;flex:1 1 160px;min-width:140px;">
+        <span style="flex:0 0 auto;">크기</span>
+        <input type="range" data-img-zoom min="50" max="300" step="5" value="${zoomPct}" style="flex:1;min-width:60px;accent-color:${color};">
+        <span data-img-zoom-label style="flex:0 0 auto;width:38px;text-align:right;">${zoomPct}%</span>
+      </span>
+      <button type="button" data-img-reset style="flex:0 0 auto;padding:6px 10px;border-radius:8px;border:1px solid #d1d5db;background:#ffffff;color:#374151;font-size:12px;cursor:pointer;line-height:1.2;">초기화</button>
+      <span style="flex:1 0 100%;font-size:11px;color:#9ca3af;">100%보다 줄이면 빈 곳은 같은 사진을 흐리게 깔아 채워요 · 사진을 드래그하면 위치를 옮길 수 있어요</span>
+    </span>`;
+}
+
+let bakeSeq = 0;
+async function commitImageChange(image){
+  const seq = ++bakeSeq;
+  await bakeImage(image);
+  if(seq !== bakeSeq) return;   // 더 최신 변경이 있으면 화면 갱신은 그쪽에 맡김
+  renderImageSummary();
+  updateOutput();
+}
+
 async function convertFileToWebpV2(file){
-  const originalUrl = URL.createObjectURL(file);
+  const originalUrl = URL.createObjectURL(file);   // 맞춤 조절을 위해 원본은 계속 보관
   try{
     const source = await loadImageElement(originalUrl);
-    const canvas = document.createElement('canvas');
-    canvas.width = source.naturalWidth || source.width;
-    canvas.height = source.naturalHeight || source.height;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(source, 0, 0);
-    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/webp', 0.86));
-    if(!blob) throw new Error('WebP 변환에 실패했습니다');
-    const dataUrl = await blobToDataUrl(blob);
-    return {
+    const image = {
       id: ++imageSeq,
       originalName: file.name,
-      dataUrl,
-      blobUrl: URL.createObjectURL(blob),
-      size: blob.size,
+      dataUrl: '',
+      blobUrl: '',
+      size: 0,
       filename: '',
       x: 50,
-      y: 50
+      y: 50,
+      zoom: 1,
+      _src: source,
+      _srcUrl: originalUrl
     };
-  }finally{
+    image.fit = defaultFitFor(image);
+    await bakeImage(image);
+    return image;
+  }catch(error){
     URL.revokeObjectURL(originalUrl);
+    throw error;
   }
 }
 
@@ -595,7 +701,11 @@ async function handleSlotFileChange(){
 $('slotFileInput').addEventListener('change', handleSlotFileChange);
 
 function removeStepImageV2(stepIndex, imageIndex){
-  steps[stepIndex].images.splice(imageIndex, 1);
+  const [removed] = steps[stepIndex].images.splice(imageIndex, 1);
+  if(removed){
+    if(removed._srcUrl) URL.revokeObjectURL(removed._srcUrl);
+    if(removed.blobUrl) URL.revokeObjectURL(removed.blobUrl);
+  }
   renumberImageFilenames();
   drawSteps();
   renderImageSummary();
@@ -696,7 +806,7 @@ function buildFragment(preview = false){
       const stepImageIcon = `<svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><path d="M21 15l-5-5L5 21"></path></svg>`;
       const stepImagesHtml = s.images.map((image, imageIndex)=>`
                                     <span style="position:relative;display:block;width:100%;max-width:620px;margin:14px 0 0 0;line-height:0;font-size:0;">
-                                        <span style="display:block;width:100%;aspect-ratio:16/9;overflow:hidden;border-radius:14px;background:#F5F5F7;line-height:0;font-size:0;"><img data-step-image-index="${stepIndex}" data-step-image-photo-index="${imageIndex}" src="${preview ? image.dataUrl : normalizeOutputImageSrc(buildImageUrl(image.filename))}" alt="${esc(s.title || `단계 ${i+1} 이미지`)}" style="display:block;width:100%;height:100%;object-fit:cover;object-position:${image.x ?? 50}% ${image.y ?? 50}%;border:0;border-radius:14px;vertical-align:top;line-height:0;"></span>${preview ? `<button type="button" data-remove-step-image="${stepIndex}:${imageIndex}" title="이미지 제거" style="position:absolute;top:10px;right:10px;width:28px;height:28px;border:none;border-radius:50%;background:rgba(17,24,39,.55);color:#fff;font-size:13px;cursor:pointer;line-height:1;">✕</button>` : ''}
+                                        <span style="display:block;width:100%;aspect-ratio:16/9;overflow:hidden;border-radius:14px;background:#F5F5F7;line-height:0;font-size:0;"><img data-step-image-index="${stepIndex}" data-step-image-photo-index="${imageIndex}" src="${preview ? image.dataUrl : normalizeOutputImageSrc(buildImageUrl(image.filename))}" alt="${esc(s.title || `단계 ${i+1} 이미지`)}" style="display:block;width:100%;height:100%;object-fit:cover;object-position:50% 50%;border:0;border-radius:14px;vertical-align:top;line-height:0;"></span>${preview ? `<button type="button" data-remove-step-image="${stepIndex}:${imageIndex}" title="이미지 제거" style="position:absolute;top:10px;right:10px;width:28px;height:28px;border:none;border-radius:50%;background:rgba(17,24,39,.55);color:#fff;font-size:13px;cursor:pointer;line-height:1;">✕</button>${imageToolsHtml(image, stepIndex, imageIndex, c)}` : ''}
                                     </span>`).join('');
       const addMoreHtml = preview ? (s.images.length ? `
                                     <span data-slot-target="step-${stepIndex}" style="cursor:pointer;display:flex;align-items:center;justify-content:center;width:100%;max-width:620px;height:48px;border:1.5px dashed #cbd5e1;border-radius:14px;background:#F5F5F7;color:#9ca3af;font-size:13px;text-align:center;margin:10px 0 0 0;">+ 사진 추가 · 파일을 여기에 놓으세요</span>` : `
@@ -785,11 +895,11 @@ function buildFullDocument(preview = false){
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>${esc($('companyName').value)} 구축사례</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
-</head>
+<\/head>
 <body style="margin:0;padding:0;background:#ffffff;">
 ${buildFragment(preview)}
-</body>
-</html>`;
+<\/body>
+<\/html>`;
 }
 
 /* ===================== 미리보기 인터랙션 (클릭 업로드 · 드래그 위치 조정 · 삭제) ===================== */
@@ -835,20 +945,22 @@ function bindPreviewInteractions(){
     void addFilesToStep(Array.from(e.dataTransfer.files || []), slot);
   });
 
-  const bindDrag = (img, getStart, setPosition) => {
+  // 사진 드래그: 위치를 옮기면 미리보기는 즉시, WebP는 손을 뗄 때 다시 만듦
+  const bindDrag = (img, image) => {
     img.draggable = false;
     img.style.cursor = 'move';
     img.title = '드래그해서 이미지 위치를 조정하세요';
 
-    let dragging = false;
+    let dragging = false, moved = false;
     let startX = 0, startY = 0, startPosX = 50, startPosY = 50;
 
     img.addEventListener('mousedown', e=>{
+      if(!image._src) return;
       e.preventDefault();
-      dragging = true;
+      dragging = true; moved = false;
       startX = e.clientX; startY = e.clientY;
-      const start = getStart();
-      startPosX = start.x; startPosY = start.y;
+      startPosX = image.x ?? 50; startPosY = image.y ?? 50;
+      if(!image._overflow) renderPreviewDataUrl(image);
       img.style.cursor = 'grabbing';
     });
 
@@ -857,23 +969,23 @@ function bindPreviewInteractions(){
       const rect = img.getBoundingClientRect();
       const dx = ((e.clientX - startX) / rect.width) * 100;
       const dy = ((e.clientY - startY) / rect.height) * 100;
-      const x = Math.round(clamp(startPosX - dx, 0, 100));
-      const y = Math.round(clamp(startPosY - dy, 0, 100));
-      setPosition(x, y);
-      img.style.objectPosition = `${x}% ${y}%`;
-      $('codeView').value = buildFragment();
+      // 틀보다 큰 사진은 반대로, 작은 사진은 같은 방향으로 움직여야 손을 따라감
+      const sx = image._overflow && image._overflow.x ? -1 : 1;
+      const sy = image._overflow && image._overflow.y ? -1 : 1;
+      image.x = Math.round(clamp(startPosX + sx * dx, 0, 100));
+      image.y = Math.round(clamp(startPosY + sy * dy, 0, 100));
+      moved = true;
+      img.src = renderPreviewDataUrl(image);
     });
 
-    doc.addEventListener('mouseup', ()=>{
+    const finish = () => {
       if(!dragging) return;
       dragging = false;
       img.style.cursor = 'move';
-    });
-
-    doc.addEventListener('mouseleave', ()=>{
-      dragging = false;
-      img.style.cursor = 'move';
-    });
+      if(moved) void commitImageChange(image);
+    };
+    doc.addEventListener('mouseup', finish);
+    doc.addEventListener('mouseleave', finish);
   };
 
   doc.querySelectorAll('[data-step-image-index]').forEach(img=>{
@@ -881,11 +993,38 @@ function bindPreviewInteractions(){
     const ii = Number(img.getAttribute('data-step-image-photo-index'));
     const image = steps[si] && steps[si].images[ii];
     if(!image) return;
-    bindDrag(
-      img,
-      ()=>({x:image.x ?? 50, y:image.y ?? 50}),
-      (x,y)=>{ image.x = x; image.y = y; }
-    );
+    bindDrag(img, image);
+  });
+
+  // 전체 보기 / 꽉 채우기 / 확대 / 초기화
+  doc.querySelectorAll('[data-img-tools]').forEach(tools=>{
+    const [si, ii] = tools.getAttribute('data-img-tools').split(':').map(Number);
+    const image = steps[si] && steps[si].images[ii];
+    if(!image || !image._src) { tools.style.display = 'none'; return; }
+    const img = doc.querySelector(`[data-step-image-index="${si}"][data-step-image-photo-index="${ii}"]`);
+    const zoomInput = tools.querySelector('[data-img-zoom]');
+    const zoomLabel = tools.querySelector('[data-img-zoom-label]');
+
+    tools.querySelectorAll('[data-img-fit]').forEach(b=>{
+      b.addEventListener('click', e=>{
+        e.preventDefault();
+        image.fit = b.getAttribute('data-img-fit');
+        image.zoom = 1; image.x = 50; image.y = 50;
+        void commitImageChange(image);
+      });
+    });
+    zoomInput.addEventListener('input', ()=>{
+      image.zoom = Number(zoomInput.value) / 100;
+      zoomLabel.textContent = zoomInput.value + '%';
+      if(img) img.src = renderPreviewDataUrl(image);
+    });
+    zoomInput.addEventListener('change', ()=>{ void commitImageChange(image); });
+    tools.querySelector('[data-img-reset]').addEventListener('click', e=>{
+      e.preventDefault();
+      image.fit = defaultFitFor(image);
+      image.zoom = 1; image.x = 50; image.y = 50;
+      void commitImageChange(image);
+    });
   });
 
   doc.querySelectorAll('[data-slot-target]').forEach(el=>{
